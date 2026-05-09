@@ -1,0 +1,9 @@
+name: Validate PR Title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  call-validate:
+    uses: INENI-PT-GROUP-B/.github/.github/workflows/pr-title-reusable.yml@main
