@@ -1,0 +1,2 @@
+# Shell scripts must keep LF line endings regardless of platform autocrlf settings
+*.sh text eol=lf
