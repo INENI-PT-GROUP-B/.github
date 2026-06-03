@@ -1,0 +1,99 @@
+name: Reusable - Root App Spec Identity
+
+# Pre-merge contract check: the two manifests defining the Argo CD root
+# Application-of-Applications must keep their `spec` blocks identical.
+#
+#   - platform-iac/bootstrap/argocd-bootstrap.yaml (applied imperatively by
+#     bootstrap.sh Phase 5; ground truth on first apply)
+#   - platform-gitops/applications/root.yaml (git source of truth Argo CD
+#     reconciles on every sync; ground truth thereafter)
+#
+# Any spec divergence leaves the root permanently OutOfSync — selfHeal would
+# fight the bootstrap's re-apply. This check is called by each repo's CI for
+# PRs that touch either file. metadata.finalizers diverges intentionally on
+# the gitops side; only `spec` is compared.
+#
+# See INENI-PT-GROUP-B/platform-gitops#29 for the design rationale.
+
+on:
+  workflow_call:
+    inputs:
+      pr-side:
+        description: Which repo the PR is in (platform-iac or platform-gitops)
+        required: true
+        type: string
+
+env:
+  YQ_VERSION: v4.53.2
+
+jobs:
+  check:
+    name: Compare root App spec blocks
+    runs-on: ubuntu-latest
+    env:
+      PR_SIDE: ${{ inputs.pr-side }}
+    steps:
+      - name: Validate input
+        run: |
+          case "$PR_SIDE" in
+            platform-iac|platform-gitops) ;;
+            *)
+              echo "::error::pr-side must be platform-iac or platform-gitops, got: $PR_SIDE"
+              exit 1
+              ;;
+          esac
+
+      - name: Determine file paths
+        id: paths
+        run: |
+          if [ "$PR_SIDE" = "platform-iac" ]; then
+            echo "pr-file=bootstrap/argocd-bootstrap.yaml" >> "$GITHUB_OUTPUT"
+            echo "other-repo=INENI-PT-GROUP-B/platform-gitops" >> "$GITHUB_OUTPUT"
+            echo "other-file=applications/root.yaml" >> "$GITHUB_OUTPUT"
+          else
+            echo "pr-file=applications/root.yaml" >> "$GITHUB_OUTPUT"
+            echo "other-repo=INENI-PT-GROUP-B/platform-iac" >> "$GITHUB_OUTPUT"
+            echo "other-file=bootstrap/argocd-bootstrap.yaml" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out PR head
+        uses: actions/checkout@v6
+        with:
+          path: pr-side
+
+      - name: Clone other repo's main
+        env:
+          OTHER_REPO: ${{ steps.paths.outputs.other-repo }}
+        run: |
+          git clone --depth 1 --branch main \
+            "https://github.com/${OTHER_REPO}.git" \
+            other-side
+
+      - name: Install yq
+        run: |
+          curl -fsSL -o /tmp/yq \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          sudo install -m 0755 /tmp/yq /usr/local/bin/yq
+          yq --version
+
+      - name: Compare spec blocks
+        env:
+          PR_FILE: ${{ steps.paths.outputs.pr-file }}
+          OTHER_FILE: ${{ steps.paths.outputs.other-file }}
+        run: |
+          extract() {
+            local file="$1"
+            local out="$2"
+            yq -o=json '.spec' "$file" | jq -S . > "$out"
+            if [ "$(cat "$out")" = "null" ]; then
+              echo "::error::No .spec block found in $file"
+              exit 1
+            fi
+          }
+          extract "pr-side/${PR_FILE}" pr-spec.json
+          extract "other-side/${OTHER_FILE}" other-spec.json
+          if ! diff -u other-spec.json pr-spec.json; then
+            echo "::error::Root App spec drift detected (platform-iac/bootstrap/argocd-bootstrap.yaml vs platform-gitops/applications/root.yaml). See diff above and INENI-PT-GROUP-B/platform-gitops#29 for the contract."
+            exit 1
+          fi
+          echo "Root App spec blocks are identical."
